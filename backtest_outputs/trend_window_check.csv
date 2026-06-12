@@ -1,0 +1,5 @@
+metric,value
+rows,4135.0
+mean_abs_base_diff,0.19
+p95_abs_base_diff,0.62
+band_change_pct,0.85

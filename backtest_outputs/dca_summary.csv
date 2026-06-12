@@ -1,0 +1,3 @@
+asset,months,heat_final_value,fixed_final_value,heat_vs_fixed_pct,heat_cash_end,heat_max_drawdown_pct,fixed_max_drawdown_pct,band_months
+SPX,233,802.19,876.38,-8.46,55.0,-21.99,-23.4,"{""blue"": 5, ""green"": 29, ""neutral"": 105, ""orange"": 20, ""yellow"": 74}"
+NDX,233,1695.68,1844.71,-8.08,55.5,-31.5,-33.07,"{""blue"": 5, ""green"": 29, ""neutral"": 105, ""orange"": 21, ""yellow"": 73}"

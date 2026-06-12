@@ -1,0 +1,9 @@
+scenario,status,doc_check,start,end,days,base_min,base_median,base_max,spx_heat_max,ndx_heat_max,V_median,S_min,T_min,days_base_lt_15,days_base_15_35,days_base_gt_75,sell_signal_days,panic_marker_days,ndx_overheat_days,spx_breadth_divergence_days,ndx_breadth_divergence_days
+2000_dotcom_top,no full heat data,not_evaluable,2000-03-01,2000-03-31,,,,,,,,,,,,,,,,,
+2002_bear_bottom,no full heat data,not_evaluable,2002-09-15,2002-10-31,,,,,,,,,,,,,,,,,
+2007_pre_gfc_top,public_enhanced,fail,2007-10-01,2007-10-31,23.0,34.9,41.34,46.55,46.55,46.55,41.86,22.64,30.79,0.0,1.0,0.0,0.0,0.0,4.0,0.0,0.0
+2009_gfc_bottom,public_enhanced,pass,2009-03-02,2009-03-31,22.0,6.58,9.93,12.53,12.53,12.53,6.78,7.64,3.67,22.0,0.0,0.0,0.0,17.0,0.0,0.0,0.0
+2018_q4_selloff,public_enhanced,pass,2018-12-17,2018-12-31,10.0,28.37,30.51,33.68,33.68,33.68,55.19,1.86,13.65,0.0,10.0,0.0,0.0,1.0,0.0,0.0,0.0
+2020_covid_crash,public_enhanced,fail,2020-03-16,2020-03-31,12.0,25.18,27.71,29.07,29.07,32.07,58.78,0.34,4.44,0.0,12.0,0.0,0.0,12.0,12.0,0.0,0.0
+2021_liquidity_top,public_enhanced,fail,2021-11-01,2021-12-31,43.0,47.87,65.37,74.06,74.06,74.06,58.75,19.23,52.49,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0
+2022_hiking_bottom,public_enhanced,pass,2022-10-03,2022-10-31,21.0,33.47,34.85,39.67,39.67,39.67,62.72,9.3,13.2,0.0,11.0,0.0,0.0,2.0,0.0,0.0,0.0
