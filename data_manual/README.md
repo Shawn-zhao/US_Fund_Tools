@@ -9,6 +9,7 @@
 - 2007-01-02 至 2026-06-11/12: 当前 v2.5 回测所需核心数据已覆盖。
 - 2000/2002 场景: 仍不是完整严格覆盖，因为 VIX3M 起于 2006-07-17，Barchart `$S5TH` 广度起于 2007-01-02。
 - 非交易日没有日频记录属于正常情况，不视为缺失。
+- 2026-06-13 复查 2000 互联网泡沫数据缺口: 详见 `data_manual/DOTCOM_DATA_GAPS.md`。已补充 World Bank 美国上市公司市值/GDP 年频辅助数据至 `backtest_outputs/cache/worldbank_usa_market_cap_gdp.csv`，但它不能直接替代严格日/月频回测口径。
 
 ## 关键手工数据
 
