@@ -17,6 +17,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+CST = dt.timezone(dt.timedelta(hours=8))  # 东八区(北京时间)
+
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "backtest_outputs" / "cache"
 
@@ -41,7 +43,7 @@ YH_SYMBOL = {"GSPC": "^GSPC", "NDX": "^NDX", "VIX": "^VIX", "VIX3M": "^VIX3M", "
 
 
 def log(*a):
-    print(dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"), *a)
+    print(dt.datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S"), *a)
 
 
 # ---------- 1) 抓取并追加最新行情 ----------
@@ -208,7 +210,8 @@ def build_status():
         }
     return {
         "as_of": str(as_of.date()),
-        "generated_at": dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        "generated_at": dt.datetime.now(CST).strftime("%Y-%m-%d %H:%M 北京时间"),
+        "generated_epoch": int(dt.datetime.now(CST).timestamp() * 1000),
         "monthly_plan": MONTHLY_PLAN,
         "monthly_total": sum(p["amount"] for p in MONTHLY_PLAN.values()),
         "assets": assets,
@@ -273,6 +276,24 @@ a{color:#58a6ff}
 <script>
 const DATA = /*DATA*/;
 document.getElementById('sub').textContent = '数据截至 ' + DATA.as_of + ' · 生成于 ' + DATA.generated_at;
+(function(){
+  const day = 86400000, nowMs = Date.now();
+  // 以东八区(北京时间)为基准计算"距今几天";as_of 视为北京时间当日
+  const asOfMs = Date.parse(DATA.as_of + 'T00:00:00+08:00');
+  const ageData = Math.floor((nowMs - asOfMs) / day);
+  const ageGen = DATA.generated_epoch ? Math.floor((nowMs - DATA.generated_epoch) / day) : -1;
+  let msg = '';
+  if (ageData >= 1) msg = '行情数据距今 ' + ageData + ' 天(非最新)';
+  else if (ageGen >= 1) msg = '页面已 ' + ageGen + ' 天未重新生成,每日任务可能已停摆';
+  if (msg){
+    const sev = (ageData >= 5 || ageGen >= 5) ? '#c0392b' : '#b7791f';
+    const b = document.createElement('div');
+    b.style.cssText = 'background:'+sev+';color:#fff;padding:14px 18px;border-radius:12px;font-size:15px;font-weight:600;margin-bottom:16px';
+    b.textContent = '⚠️ ' + msg + ' —— 若非周末/长假,请检查 GitHub Actions / 数据源是否正常。';
+    const wrap = document.querySelector('.wrap');
+    wrap.insertBefore(b, wrap.firstChild);
+  }
+})();
 const plan = Object.entries(DATA.monthly_plan).map(([k,v])=>`${k} <b>$${v.amount.toLocaleString()}</b> → ${v.etf}`).join(' ＋ ');
 document.getElementById('plan').innerHTML = '📅 每月第一个交易日定投(共 <b>$'+DATA.monthly_total.toLocaleString()+'</b>):' + plan + ' 。任何状态下这笔定投都照常执行。';
 const box = document.getElementById('assets');
