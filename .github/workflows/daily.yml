@@ -1,0 +1,48 @@
+name: daily-status
+
+# 每天美股收盘后自动跑 daily_status.py,生成 status.json / index.html,提交回仓库。
+# GitHub Pages 设为「从 main 分支根目录部署」后,index.html 即可公网访问。
+# 注意:GitHub 定时任务用 UTC,且高峰期可能延迟几分钟到几十分钟(对每天一次无影响)。
+
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"   # 22:30 UTC ≈ 美东收盘后(夏令时 18:30 ET / 冬令时 17:30 ET)
+  workflow_dispatch:           # 也可在 Actions 页面手动触发
+
+permissions:
+  contents: write              # 允许把生成结果提交回仓库
+
+concurrency:
+  group: daily-status
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run daily status
+        run: python daily_status.py
+
+      - name: Commit results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A status.json index.html backtest_outputs/cache/*.csv backtest_outputs/cache/*.json
+          if git diff --cached --quiet; then
+            echo "无变化,跳过提交"
+          else
+            git commit -m "chore: daily status $(date -u +%F) [skip ci]"
+            git push
+          fi
