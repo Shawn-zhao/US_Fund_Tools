@@ -33,7 +33,7 @@ python3 fetch_data.py                    # 仅更新月频宏观缓存(FRED/CAPE
 - **ChatGPT / Codex 谱系**:`backtest_heat_v25.py`、`backtest_heat_v26.py`、`*_Codex-GPT5.md`、`backtest_outputs/backtest_report.md`。独立实现。
 两者结论方向一致但数字口径不同,**不能逐位比较**。
 
-**生产链路**:`daily_status.py`(抓最新行情→`build_core`→回放"合并版"状态机→输出 `status.json` + `index.html`)+ `fetch_data.py`(月频宏观抓取)+ `.github/workflows/daily.yml`(GitHub Actions 每工作日跑一次并提交回仓库;GitHub Pages 从 main 根目录部署)。
+**生产链路**:`daily_status.py`(抓最新行情→`build_core`→回放"合并版"状态机→输出 `status.json` + `index.html`)+ `fetch_data.py`(月频宏观抓取)+ `.github/workflows/daily.yml`(GitHub Actions 每工作日跑一次:用 **Actions 部署**把 `index.html` 作为 artifact 发布到 GitHub Pages,**不再每天提交回仓库**;只在**每月第一个周一**把行情缓存 CSV 提交回仓库一次)。`index.html` / `status.json` 是生成产物,已加入 `.gitignore`、不纳入版本控制,以线上 Pages 为准。
 
 ## 版本与文档脉络
 
