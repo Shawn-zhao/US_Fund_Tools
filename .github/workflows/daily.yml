@@ -1,16 +1,22 @@
 name: daily-status
 
-# 每天美股收盘后自动跑 daily_status.py,生成 status.json / index.html,提交回仓库。
-# GitHub Pages 设为「从 main 分支根目录部署」后,index.html 即可公网访问。
+# 每个工作日美股收盘后跑 daily_status.py,生成 index.html / status.json。
+# 发布方式:GitHub Pages「用 Actions 部署」——把产物作为 artifact 上传部署,
+#   不再每天 commit 回仓库,所以 main 分支不会被每日提交刷屏。
+# 缓存持久化:只在「每月第一个周一」把 5 个行情缓存 CSV 提交回仓库一次。
+#   依据:daily_status.py 的 fetch_yahoo 一次抓最近 3 个月(≈63 交易日),
+#   远大于一个月空档(≈21 交易日),3 倍冗余,断档风险基本为零。
 # 注意:GitHub 定时任务用 UTC,且高峰期可能延迟几分钟到几十分钟(对每天一次无影响)。
 
 on:
   schedule:
     - cron: "30 22 * * 1-5"   # 22:30 UTC ≈ 美东收盘后(夏令时 18:30 ET / 冬令时 17:30 ET)
-  workflow_dispatch:           # 也可在 Actions 页面手动触发
+  workflow_dispatch:           # 也可在 Actions 页面手动触发(手动触发只发布、不提交缓存)
 
 permissions:
-  contents: write              # 允许把生成结果提交回仓库
+  contents: write              # 每月提交缓存需要写仓库
+  pages: write                 # 部署 GitHub Pages
+  id-token: write              # Pages 部署的 OIDC 鉴权
 
 concurrency:
   group: daily-status
@@ -19,6 +25,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,14 +44,36 @@ jobs:
       - name: Run daily status
         run: python daily_status.py
 
-      - name: Commit results
+      # ---- 每天:把产物作为 Pages artifact 部署(不写回仓库) ----
+      - name: Prepare site
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A status.json index.html backtest_outputs/cache/*.csv backtest_outputs/cache/*.json
-          if git diff --cached --quiet; then
-            echo "无变化,跳过提交"
+          mkdir -p _site
+          cp index.html status.json _site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      # ---- 每月一次:把行情缓存提交回仓库(仅每月第一个周一) ----
+      # 漏了某次(假期/失败)也无妨:间隔最多拉到约 2 个月,仍在 fetch_yahoo 的 3 个月窗口内。
+      - name: Commit cache monthly
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          if [ "$(date -u +%u)" = "1" ] && [ "$(date -u +%d)" -le 07 ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add backtest_outputs/cache/*.csv backtest_outputs/cache/*.json
+            if git diff --cached --quiet; then
+              echo "缓存无变化,跳过提交"
+            else
+              git commit -m "chore: monthly cache $(date -u +%F) [skip ci]"
+              git push
+            fi
           else
-            git commit -m "chore: daily status $(date -u +%F) [skip ci]"
-            git push
+            echo "今天不是每月提交日(每月第一个周一),跳过缓存提交"
           fi
