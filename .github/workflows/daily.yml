@@ -3,7 +3,8 @@ name: daily-status
 # 每个工作日美股收盘后跑 daily_status.py,生成 index.html / status.json。
 # 发布方式:GitHub Pages「用 Actions 部署」——把产物作为 artifact 上传部署,
 #   不再每天 commit 回仓库,所以 main 分支不会被每日提交刷屏。
-# 缓存持久化:只在「每月第一个周一」把 5 个行情缓存 CSV 提交回仓库一次。
+# 缓存持久化:每月把 backtest_outputs/cache 与 data_manual 提交回仓库一次
+#   (本月首次成功运行;见文末 "Commit cache monthly")。
 #   依据:daily_status.py 的 fetch_yahoo 一次抓最近 3 个月(≈63 交易日),
 #   远大于一个月空档(≈21 交易日),3 倍冗余,断档风险基本为零。
 # 注意:GitHub 定时任务用 UTC,且高峰期可能延迟几分钟到几十分钟(对每天一次无影响)。
@@ -59,15 +60,20 @@ jobs:
         id: deploy
         uses: actions/deploy-pages@v4
 
-      # ---- 每月一次:把行情缓存提交回仓库(仅每月第一个周一) ----
-      # 漏了某次(假期/失败)也无妨:间隔最多拉到约 2 个月,仍在 fetch_yahoo 的 3 个月窗口内。
+      # ---- 每月一次:把缓存提交回仓库(本月首次成功运行) ----
+      # 原逻辑是「每月第一个周一」,但若那天恰逢运行被取消/失败(如 2026-09-07 那次),
+      # 整个月就不会提交。改成「本月尚未提交过就提交」,自动补上漏掉的月份。
+      # 注意:提交范围必须覆盖非 csv/json 的缓存(如 h15_all.zip)与 data_manual/,
+      # 否则手工刷新的数据永远进不了仓库、Actions 每次 checkout 都拿到旧的。
       - name: Commit cache monthly
         if: ${{ github.event_name == 'schedule' }}
         run: |
-          if [ "$(date -u +%u)" = "1" ] && [ "$(date -u +%d)" -le 07 ]; then
+          THIS_MONTH=$(date -u +%Y-%m)
+          LAST_MONTH=$(git log -1 --format=%cd --date=format:%Y-%m -- backtest_outputs/cache || true)
+          if [ "$LAST_MONTH" != "$THIS_MONTH" ]; then
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add backtest_outputs/cache/*.csv backtest_outputs/cache/*.json
+            git add backtest_outputs/cache data_manual
             if git diff --cached --quiet; then
               echo "缓存无变化,跳过提交"
             else
@@ -75,5 +81,5 @@ jobs:
               git push
             fi
           else
-            echo "今天不是每月提交日(每月第一个周一),跳过缓存提交"
+            echo "本月($THIS_MONTH)已提交过缓存,跳过"
           fi

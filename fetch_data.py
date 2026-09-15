@@ -8,13 +8,16 @@
   - FRED CPIAUCSL  -> fred_CPIAUCSL.csv         (CPI,月度)
   - FRED GDP       -> fred_GDP.csv              (GDP,季度)
   - FRED BAMLH0A0HYM2 -> macrotrends_high_yield_spread_D.json  (HY 利差,日度;转成 load_hy_oas 的 json 格式)
+  - FRED DGS10     -> fred_DGS10.csv            (10年期名义利率,日度;= H.15 RIFLGFCY10_N.B)
+  - FRED DFII10    -> fred_DFII10.csv           (10年期 TIPS 实际利率,日度;= H.15 RIFLGFCY10_XII_N.B)
   - multpl Shiller PE -> multpl_shiller_pe.csv  (CAPE,月度;HTML 抓取,较脆,失败回退缓存)
 
 仍需手动/单独维护(无稳定免费源,见文末说明):
   - barchart 广度 barchart_s5th_breadth.csv
   - CBOE Put/Call(data_manual/total_put_call.csv)
-  - 美联储 H.15 利率 h15_all.zip
-这些权重低、变化慢,偶尔手动刷新即可;若长期不更新仅轻微影响 ECY/广度/情绪分位。
+  - 美联储 H.15 利率 h15_all.zip(已降级为 10年期利率的兜底源,见 load_rate_series)
+这些权重低、变化慢,偶尔手动刷新即可;但停更过久会让对应用分量整列断供
+(见 daily_status.py 的 freshcheck),需靠日志/页面告警发现。
 """
 from __future__ import annotations
 import json, re, io, time, random, datetime as dt, urllib.request, urllib.parse
@@ -22,14 +25,17 @@ from pathlib import Path
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+# 重要:fred.stlouisfed.org 会掐断带浏览器 UA 的请求(连接建立后不返回数据,最终超时);
+# 用非浏览器 UA 才能拿到 fredgraph.csv。曾经因为统一用 UA(浏览器) 导致 FRED 全线抓取失败。
+UA_PLAIN = "US_Fund_Tools/1.0 (daily-status; +https://github.com/shawn-zhao/US_Fund_Tools)"
 
 
-def _get(url: str, timeout: int = 15, retries: int = 3) -> bytes:
+def _get(url: str, timeout: int = 15, retries: int = 3, ua: str | None = None) -> bytes:
     last = None
     for attempt in range(retries):
         try:
             req = urllib.request.Request(url, headers={
-                "User-Agent": UA, "Accept": "text/csv,application/json,text/html,*/*"})
+                "User-Agent": ua or UA, "Accept": "text/csv,application/json,text/html,*/*"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read()
         except Exception as e:
@@ -48,7 +54,7 @@ def _atomic_write(path: Path, data: bytes):
 # ---------- FRED:fredgraph.csv,无需 API key ----------
 def fetch_fred_csv(series_id: str) -> bytes:
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=" + series_id
-    raw = _get(url)
+    raw = _get(url, ua=UA_PLAIN)   # 必须用非浏览器 UA,否则 FRED 不返回数据
     # 校验:第一行应是表头且含 series_id,至少有几行数据
     head = raw[:200].decode("utf-8", "ignore")
     if series_id not in head or b"\n" not in raw[:10_000]:
@@ -132,6 +138,10 @@ def update_macro(cache: Path, log=print):
     update_fred(cache, "CPIAUCSL", "fred_CPIAUCSL.csv", log)
     update_fred(cache, "GDP", "fred_GDP.csv", log)
     update_fred(cache, "BAMLH0A0HYM2", "fred_BAMLH0A0HYM2.csv", log)
+    # 10年期利率:ECY(实际利率)依赖它;停更会让整条信号链冻结在"上一个月"。
+    # FRED DGS10/DFII10 即 H.15 的 RIFLGFCY10_N.B / RIFLGFCY10_XII_N.B,逐点同值。
+    update_fred(cache, "DGS10", "fred_DGS10.csv", log)
+    update_fred(cache, "DFII10", "fred_DFII10.csv", log)
     update_hy_oas(cache, log)
     update_cape_multpl(cache, log)
 

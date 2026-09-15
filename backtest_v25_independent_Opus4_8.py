@@ -102,6 +102,32 @@ def load_hy_oas() -> pd.Series:
     return s.dropna().sort_index()
 
 
+# FRED 日频替代源:与 H.15 的 RIFLGFCY*.B 系列逐点同值(全历史零差异),
+# 但可经 fredgraph.csv 自动更新,不会像 h15_all.zip 那样需要手工下载而长期停更。
+RATE_FRED_FALLBACK = {
+    "RIFLGFCY10_N.B":    "fred_DGS10.csv",    # 10年期名义国债收益率 <-> FRED DGS10
+    "RIFLGFCY10_XII_N.B": "fred_DFII10.csv",  # 10年期 TIPS 实际收益率 <-> FRED DFII10
+}
+# 注意:3个月期 RIFLGFCM03_N.B 不能用 FRED DTB3 替代——DTB3 是贴现率口径,
+# 与 H.15 的票息等价口径逐点不同(11193 个共同日中 8753 个不一致),故不做映射。
+
+
+def load_rate_series(series_name: str) -> pd.Series:
+    """利率序列加载器:优先用 FRED 日频缓存(可自动更新),缺失时回退 h15_all.zip。
+
+    优先 FRED 的原因:h15_all.zip 无稳定免费自动源,fetch_data.py 只能手工维护,
+    一旦停更会让 ECY(实际利率口径)整列断供,进而把 base/heat 一起拖死
+    (daily_in_monthly_window_pct 的 lag=1 要求"上月"必须存在于月度序列中)。
+    FRED DGS10/DFII10/DTB3 就是 H.15 同源重发布,逐点同值,替换不改变任何历史取值。
+    """
+    fname = RATE_FRED_FALLBACK.get(series_name)
+    if fname and (CACHE / fname).exists():
+        s = load_fred(fname)
+        if len(s) > 1000:
+            return s
+    return load_h15_series(series_name)
+
+
 def load_h15_series(series_name: str) -> pd.Series:
     with zipfile.ZipFile(CACHE / "h15_all.zip") as zf:
         xml = zf.read("H15_data.xml").decode("utf-8", "ignore")
@@ -259,8 +285,8 @@ def build() -> pd.DataFrame:
     hy = load_hy_oas()
     pc = load_put_call()
     breadth = load_breadth()
-    nom10 = load_h15_series("RIFLGFCY10_N.B")
-    tips10 = load_h15_series("RIFLGFCY10_XII_N.B")
+    nom10 = load_rate_series("RIFLGFCY10_N.B")
+    tips10 = load_rate_series("RIFLGFCY10_XII_N.B")
 
     # 日频主索引:SPX∩NDX(NDX 自 1985-10)
     idx = spx.index.intersection(ndx.index)

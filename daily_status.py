@@ -122,6 +122,61 @@ def compute_signals():
     return df
 
 
+# ---------- 2b) 数据新鲜度自检 ----------
+# 上游输入停更时,信号链会"整列变 NaN"从而把 as_of 冻在过去某一天,而过程完全静默:
+#   - reweight() 对缺项会静默按剩余权重归一(例如 Put/Call 停更后 S 只剩 VIX);
+#   - daily_in_monthly_window_pct() 的 lag=1 要求"上月"存在于月度序列,月频源停更
+#     会让 ECY/CAPE/Buffett 整体断供,进而把 base/heat_pct 一起拖死。
+# 这里显式打印每个输入与分量的最后可用日期,并点名停更项,写进 status.json 供页面告警。
+def freshcheck(df):
+    import backtest_v25_independent_Opus4_8 as v25
+    last = df.index.max()
+    # (名称, 最后可用日期, 容忍滞后天数)
+    inputs = [
+        ("行情 SPX/NDX(Yahoo)", df["spx"].dropna().index.max(), 5),
+        ("VIX(Yahoo)",          v25.load_yahoo(YH["VIX"]).index.max(), 5),
+        ("VIX3M(Yahoo)",        v25.load_yahoo(YH["VIX3M"]).index.max(), 5),
+        ("HY利差(FRED)",        v25.load_hy_oas().index.max(), 5),
+        ("10Y利率(FRED)",       v25.load_rate_series("RIFLGFCY10_N.B").index.max(), 5),
+        ("10Y TIPS(FRED)",      v25.load_rate_series("RIFLGFCY10_XII_N.B").index.max(), 5),
+        ("CAPE(multpl·月)",     v25.load_cape().index.max(), 60),
+        ("CPI(FRED·月)",        v25.load_fred("fred_CPIAUCSL.csv").index.max(), 60),
+        ("广度(barchart·月)",   v25.load_breadth().index.max(), 60),
+        ("Put/Call(手工·月)",   v25.load_put_call().index.max(), 60),
+        ("GDP(FRED·季)",        v25.load_fred("fred_GDP.csv").index.max(), 200),
+    ]
+    report, stale = {}, []
+    log("  -- 输入源最后可用日期(基准 = 最后交易日 %s)--" % last.date())
+    for name, d, tol in inputs:
+        if d is None or pd.isna(d):
+            log(f"     {name:<22} 全缺"); stale.append(name); continue
+        age = int((last - d).days)
+        report[name] = {"last": str(d.date()), "age_days": age}
+        if age > tol:
+            stale.append(name)
+        log(f"     {name:<22} {d.date()}  落后 {age:>4} 天" + ("   <== 停更" if age > tol else ""))
+
+    comps = ["CAPE", "ECY", "Buffett", "V", "VIX", "VIXTerm", "PutCall", "S",
+             "Dev200", "Drawdown", "WeeklyRSI", "T", "BreadthU", "HY", "B", "base", "heat_pct"]
+    log("  -- 信号分量最后可用日期 --")
+    for c in comps:
+        s = df[c].dropna()
+        if not len(s):
+            log(f"     {c:<10} 全缺"); stale.append(c); continue
+        d = s.index.max()
+        dead = bool(d < last)
+        report["分量:" + c] = {"last": str(d.date()), "dead": dead}
+        if dead:
+            stale.append(c)
+        note = ""
+        if dead:
+            note = "   <== 其后全 NaN(断供)"
+            if c in ("CAPE", "ECY", "Buffett", "V", "base", "heat_pct"):
+                note += " [会拖住 as_of]"
+        log(f"     {c:<10} {d.date()}" + note)
+    return report, stale
+
+
 # ---------- 3) 回放合并版状态机 ----------
 def replay(df, price_col):
     """对单个资产回放状态机,返回逐日状态 DataFrame(到今日)。"""
@@ -168,6 +223,12 @@ def replay(df, price_col):
 def build_status():
     df = compute_signals()
     as_of = df.dropna(subset=["heat", "CAPE", "Buffett"]).index.max()
+    market_last = df.index.max()
+    log("== 数据新鲜度自检 ==")
+    dq, stale = freshcheck(df)
+    if as_of < market_last:
+        log(f"  !! 警告:行情已到 {market_last.date()},但信号只算到 {as_of.date()}。"
+            f"上游输入停更,导致 {market_last.date()} 之后的信号整列缺失。")
     assets = {}
     for asset, col in [("SPX", "spx"), ("NDX", "ndx")]:
         sub, st = replay(df, col)
@@ -210,8 +271,10 @@ def build_status():
         }
     return {
         "as_of": str(as_of.date()),
+        "market_last": str(market_last.date()),
         "generated_at": dt.datetime.now(CST).strftime("%Y-%m-%d %H:%M 北京时间"),
         "generated_epoch": int(dt.datetime.now(CST).timestamp() * 1000),
+        "data_quality": {"stale": stale, "items": dq},
         "monthly_plan": MONTHLY_PLAN,
         "monthly_total": sum(p["amount"] for p in MONTHLY_PLAN.values()),
         "assets": assets,
@@ -277,19 +340,42 @@ a{color:#58a6ff}
 const DATA = /*DATA*/;
 document.getElementById('sub').textContent = '数据截至 ' + DATA.as_of + ' · 生成于 ' + DATA.generated_at;
 (function(){
-  const day = 86400000, nowMs = Date.now();
-  // 以东八区(北京时间)为基准计算"距今几天";as_of 视为北京时间当日
-  const asOfMs = Date.parse(DATA.as_of + 'T00:00:00+08:00');
-  const ageData = Math.floor((nowMs - asOfMs) / day);
+  const day = 86400000, TZ = 8*3600*1000, nowMs = Date.now();
+  // 以东八区(北京时间)为基准。as_of 是「上一交易日」,所以不能简单地按"距今≥1天"报警,
+  // 否则每周末和每天收盘前都会误报。改为统计 as_of 之后"缺失的周一~周五天数"。
+  function missingWeekdays(asOfISO){
+    const start = Date.parse(asOfISO + 'T00:00:00+08:00');
+    const todayB = Math.floor((nowMs + TZ) / day) * day - TZ;   // 北京时间今天 00:00
+    let n = 0;
+    for (let t = start + day; t < todayB; t += day){
+      const w = new Date(t + TZ).getUTCDay();                   // 该北京日期的星期
+      if (w >= 1 && w <= 5) n++;
+    }
+    return n;
+  }
+  const marketLast = DATA.market_last || DATA.as_of;
+  const ageMarket = Math.floor((nowMs - Date.parse(marketLast + 'T00:00:00+08:00')) / day);
   const ageGen = DATA.generated_epoch ? Math.floor((nowMs - DATA.generated_epoch) / day) : -1;
-  let msg = '';
-  if (ageData >= 1) msg = '行情数据距今 ' + ageData + ' 天(非最新)';
-  else if (ageGen >= 1) msg = '页面已 ' + ageGen + ' 天未重新生成,每日任务可能已停摆';
+  const stale = (DATA.data_quality && DATA.data_quality.stale) || [];
+  const missing = missingWeekdays(marketLast);
+  let msg = '', hint = '';
+  if (DATA.as_of < marketLast){
+    // 行情抓到了新的,但信号算不出来 —— 只可能是某个上游输入停更
+    msg = '行情已更新到 ' + marketLast + ',但信号只算到 ' + DATA.as_of;
+    hint = stale.length ? '停更/断供的输入:' + stale.join('、')
+                        : '请查看 Actions 日志里的「数据新鲜度自检」。';
+  } else if (missing >= 2){
+    msg = '行情数据距今 ' + ageMarket + ' 天,缺 ' + missing + ' 个交易日(非最新)';
+    hint = '请检查 GitHub Actions / 行情数据源是否正常。';
+  } else if (ageGen >= 2){
+    msg = '页面已 ' + ageGen + ' 天未重新生成';
+    hint = '每日任务可能已停摆,请检查 GitHub Actions。';
+  }
   if (msg){
-    const sev = (ageData >= 5 || ageGen >= 5) ? '#c0392b' : '#b7791f';
+    const sev = (DATA.as_of < marketLast || missing >= 4 || ageGen >= 4) ? '#c0392b' : '#b7791f';
     const b = document.createElement('div');
     b.style.cssText = 'background:'+sev+';color:#fff;padding:14px 18px;border-radius:12px;font-size:15px;font-weight:600;margin-bottom:16px';
-    b.textContent = '⚠️ ' + msg + ' —— 若非周末/长假,请检查 GitHub Actions / 数据源是否正常。';
+    b.textContent = '⚠️ ' + msg + ' —— ' + hint;
     const wrap = document.querySelector('.wrap');
     wrap.insertBefore(b, wrap.firstChild);
   }

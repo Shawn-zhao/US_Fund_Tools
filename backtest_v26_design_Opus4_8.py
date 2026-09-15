@@ -71,8 +71,8 @@ def build_core() -> pd.DataFrame:
     hy = v25.load_hy_oas()
     pc = v25.load_put_call()
     breadth = v25.load_breadth()
-    nom10 = v25.load_h15_series("RIFLGFCY10_N.B")
-    tips10 = v25.load_h15_series("RIFLGFCY10_XII_N.B")
+    nom10 = v25.load_rate_series("RIFLGFCY10_N.B")
+    tips10 = v25.load_rate_series("RIFLGFCY10_XII_N.B")
 
     idx = spx.index.intersection(ndx.index)
     spx, ndx = spx.reindex(idx), ndx.reindex(idx)
