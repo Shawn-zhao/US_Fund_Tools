@@ -44,7 +44,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore daily indicator cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: backtest_outputs/cache/live
           key: daily-indicators-v1-${{ github.run_id }}-${{ github.run_attempt }}
@@ -55,7 +55,7 @@ jobs:
 
       - name: Save daily indicator cache
         if: ${{ hashFiles('backtest_outputs/cache/live/*.csv') != '' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: backtest_outputs/cache/live
           key: daily-indicators-v1-${{ github.run_id }}-${{ github.run_attempt }}
