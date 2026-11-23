@@ -6,8 +6,8 @@
 
 能自动抓(可靠):
   - FRED CPIAUCSL  -> fred_CPIAUCSL.csv         (CPI,月度)
-  - FRED GDP       -> fred_GDP.csv              (GDP,季度)
-  - FRED BAMLH0A0HYM2 -> macrotrends_high_yield_spread_D.json  (HY 利差,日度;转成 load_hy_oas 的 json 格式)
+  - BEA 季度 GDP 发布历史 -> gdp_bea_release_vintages.csv (带实际发布日期和值)
+  - FRED BAMLH0A0HYM2 -> fred_BAMLH0A0HYM2.csv (HY 利差,日度,按日合并)
   - FRED DGS10     -> fred_DGS10.csv            (10年期名义利率,日度;= H.15 RIFLGFCY10_N.B)
   - FRED DFII10    -> fred_DFII10.csv           (10年期 TIPS 实际利率,日度;= H.15 RIFLGFCY10_XII_N.B)
   - multpl Shiller PE -> multpl_shiller_pe.csv  (CAPE,月度;HTML 抓取,较脆,失败回退缓存)
@@ -16,9 +16,11 @@
 美联储 H.15 利率 h15_all.zip 仍是手工维护的兜底源。
 """
 from __future__ import annotations
-import csv, json, re, io, os, time, random, datetime as dt, urllib.request, urllib.parse
+import csv, json, math, re, io, os, time, random, datetime as dt, urllib.request, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from gdp_vintages import BEA_GDP_URL, GDP_RELEASES, parse_bea, read_vintages, vintage_csv
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -29,6 +31,11 @@ BREADTH_URL = "https://tradermonty.github.io/market-breadth-analysis/market_brea
 CBOE_DAILY_URL = "https://www.cboe.com/markets/us/options/market-statistics/daily"
 BREADTH_LIVE = Path("live/market_breadth_200dma.csv")
 PUT_CALL_LIVE = Path("live/cboe_total_put_call.csv")
+HY_SERIES = "BAMLH0A0HYM2"
+HY_FRED = "fred_BAMLH0A0HYM2.csv"
+HY_MACROTRENDS = "macrotrends_high_yield_spread_D.json"
+HY_MACROTRENDS_BRIDGE = "hy_oas_macrotrends_bridge.csv"
+HY_FRED_ARCHIVE = "github_eco_archive_BAMLH0A0HYM2.csv"
 BARCHART_BREADTH = "barchart_s5th_breadth.csv"
 BREADTH_ARCHIVE = "breadth_daily.csv"
 BREADTH_SOURCE = "Market Breadth Analysis"
@@ -210,30 +217,77 @@ def update_fred(cache: Path, series_id: str, fname: str, log):
         log(f"  FRED {series_id} 失败,保留旧缓存 [{repr(e)[:70]}]")
 
 
-def update_hy_oas(cache: Path, log):
-    """HY 利差:从 FRED BAMLH0A0HYM2 抓日度,转成 load_hy_oas 读的 json 格式。"""
+def update_gdp_releases(cache: Path, log):
     try:
-        raw = fetch_fred_csv("BAMLH0A0HYM2").decode("utf-8", "ignore")
-        data = []
-        for line in raw.strip().splitlines()[1:]:
-            parts = line.split(",")
-            if len(parts) < 2 or parts[1] in (".", ""):
-                continue
-            try:
-                ts = int(dt.datetime.strptime(parts[0], "%Y-%m-%d")
-                         .replace(tzinfo=dt.timezone.utc).timestamp() * 1000)
-                data.append([ts, float(parts[1])])
-            except ValueError:
-                continue
-        if len(data) < 100:
-            raise ValueError("有效行过少")
-        out = {"data": data, "metadata": {"source": "FRED BAMLH0A0HYM2",
-                                          "updated": dt.date.today().isoformat()}}
-        _atomic_write(cache / "macrotrends_high_yield_spread_D.json",
-                      json.dumps(out).encode("utf-8"))
-        log(f"  HY 利差 BAMLH0A0HYM2 -> json({len(data)} 点,至 {parts[0]})")
+        path = cache / GDP_RELEASES
+        saved = read_vintages(path) if path.exists() else {}
+        incoming = parse_bea(_get(BEA_GDP_URL, timeout=15, retries=2))
+        additions = incoming.keys() - saved.keys()
+        # 已存发布记录保留原始下载值，点时序列不会因 BEA 重写历史工作簿而变化。
+        if additions:
+            saved.update((key, incoming[key]) for key in additions)
+            _atomic_write(path, vintage_csv(saved))
+        log(f"  BEA 名义 GDP 发布记录至 {max(saved)[0]}（新增 {len(additions)} 条）")
     except Exception as e:
-        log(f"  HY 利差失败,保留旧缓存 [{repr(e)[:70]}]")
+        log(f"  BEA 名义 GDP 更新失败，保留已存发布记录 [{e}]")
+
+
+def _parse_hy_csv(raw: bytes) -> dict[dt.date, float]:
+    reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig")))
+    if reader.fieldnames is None or HY_SERIES not in reader.fieldnames:
+        raise ValueError("HY 利差 CSV 表头不匹配")
+    date_field = reader.fieldnames[0]
+    if date_field.lower() not in {"date", "observation_date"}:
+        raise ValueError("HY 利差 CSV 缺少日期列")
+    values = {}
+    for row in reader:
+        text = row[HY_SERIES]
+        if text is None or text.strip() in {"", "."}:
+            continue
+        day, value = dt.date.fromisoformat(row[date_field]), float(text)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"HY 利差值异常: {day} / {text}")
+        values[day] = value
+    return values
+
+
+def load_hy_observations(cache: Path) -> dict[dt.date, float]:
+    """读固定历史底稿与后续 FRED 缓存。较新的同系列来源优先。"""
+    values = {}
+    for filename in (HY_FRED_ARCHIVE, HY_MACROTRENDS_BRIDGE):
+        path = cache / filename
+        if path.exists():
+            values.update(_parse_hy_csv(path.read_bytes()))
+    history = cache / HY_MACROTRENDS
+    if history.exists():
+        raw = json.loads(history.read_text(encoding="utf-8"))
+        for stamp, value in raw["data"]:
+            if value is not None and math.isfinite(float(value)) and float(value) > 0:
+                date = dt.datetime.fromtimestamp(stamp / 1000, dt.timezone.utc).date()
+                values[date] = float(value)
+    fred = cache / HY_FRED
+    if fred.exists():
+        values.update(_parse_hy_csv(fred.read_bytes()))
+    return values
+
+
+def update_hy_oas(cache: Path, log):
+    """FRED 的滚动窗口只更新重叠日期及新日期，过去的记录保留。"""
+    try:
+        path = cache / HY_FRED
+        saved = _parse_hy_csv(path.read_bytes()) if path.exists() else {}
+        incoming = _parse_hy_csv(fetch_fred_csv(HY_SERIES))
+        if not incoming:
+            raise ValueError("FRED 返回空的 HY 利差数据")
+        merged = saved | incoming
+        if merged != saved:
+            body = f"observation_date,{HY_SERIES}\n" + "".join(
+                f"{date},{merged[date]}\n" for date in sorted(merged)
+            )
+            _atomic_write(path, body.encode("utf-8"))
+        log(f"  HY 利差 FRED 缓存 {len(merged)} 点（{min(merged)} 至 {max(merged)}）")
+    except Exception as e:
+        log(f"  HY 利差更新失败，保留旧缓存 [{e}]")
 
 
 # ---------- CAPE:multpl Shiller PE 月表(HTML 抓取,较脆) ----------
@@ -274,8 +328,8 @@ def update_cape_multpl(cache: Path, log):
 
 def update_macro(cache: Path, log=print):
     update_fred(cache, "CPIAUCSL", "fred_CPIAUCSL.csv", log)
-    update_fred(cache, "GDP", "fred_GDP.csv", log)
-    update_fred(cache, "BAMLH0A0HYM2", "fred_BAMLH0A0HYM2.csv", log)
+    update_fred(cache, "GDP", "fred_GDP.csv", log)  # 兼容独立回测的最新修订值缓存
+    update_gdp_releases(cache, log)
     # 10年期利率:ECY(实际利率)依赖它;停更会让整条信号链冻结在"上一个月"。
     # FRED DGS10/DFII10 即 H.15 的 RIFLGFCY10_N.B / RIFLGFCY10_XII_N.B,逐点同值。
     update_fred(cache, "DGS10", "fred_DGS10.csv", log)

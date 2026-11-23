@@ -67,7 +67,7 @@ def build_core() -> pd.DataFrame:
     w5000 = v25.load_yahoo("yahoo_W5000_1980-01-01_2026-06-13.csv")
     cape = v25.load_cape()
     cpi = v25.load_fred("fred_CPIAUCSL.csv")
-    gdp = v25.load_fred("fred_GDP.csv")
+    gdp = v25.load_gdp_released()
     hy = v25.load_hy_oas()
     pc = v25.load_put_call()
     breadth = v25.load_breadth()
@@ -104,13 +104,9 @@ def build_core() -> pd.DataFrame:
     ecy_m = ecy_m.dropna()
     df["ECY"] = daily_in_monthly_window_pct(ecy_daily, ecy_m, lag=1, window=180, invert=True)
 
-    gdp_av = gdp.copy()
-    gdp_av.index = gdp_av.index + pd.DateOffset(months=3)
-    gdp_daily = gdp_av.reindex(idx, method="ffill")
+    gdp_daily = v25.daily_ffill(gdp, idx)
     buffett_daily = w5000.reindex(idx, method="ffill") / gdp_daily
-    w5000_m = v25.to_month_last(w5000)
-    gdp_m = v25.to_month_last(gdp_av).reindex(w5000_m.index, method="ffill")
-    buffett_m = (w5000_m / gdp_m).dropna()
+    buffett_m = v25.to_month_last(w5000 / v25.daily_ffill(gdp, w5000.index))
     df["Buffett"] = daily_in_monthly_window_pct(buffett_daily, buffett_m, lag=1, window=180, invert=False)
 
     df["V"] = 0.35 * df["CAPE"] + 0.45 * df["ECY"] + 0.20 * df["Buffett"]

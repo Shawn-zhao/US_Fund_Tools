@@ -21,7 +21,7 @@
    用全历史扩展窗口。
 3. 方向(§2.4):正向(CAPE/巴菲特/偏离/RSI)取 p;反向(ECY/VIX/期限/PC/回撤/HY)取 100-p。
 4. 防前视的发布滞后(我的判断,据 §6「月更/季度」):CAPE/ECY/巴菲特按"上月值本月起可用"
-   滞后 1 个月;GDP 滞后 1 个季度。日频行情当日可用。
+   滞后 1 个月;GDP 使用当时已公布的版本。日频行情当日可用。
 5. 绝对锚点(§2.3,只冷侧):VIX>40→VIX分≤5;HY>8→HY分≤5;SPX回撤>30%或NDX回撤>40%→回撤分≤5。
 6. ECY 历史重构(§1.1/升级路线 3):2003 起用 TIPS 实际利率;之前用 名义10Y − 过去10年CPI年化。
 7. 合成(§3.1)与修正装配(§3.2 v2.4):base 纯加权;heat_spx=base+修正一SPX侧;
@@ -45,7 +45,8 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 from fetch_data import (BARCHART_BREADTH, BREADTH_ARCHIVE, BREADTH_LIVE, BREADTH_SOURCE,
-                        PUT_CALL_LIVE, breadth_archive_dir)
+                        PUT_CALL_LIVE, breadth_archive_dir, load_hy_observations)
+from gdp_vintages import GDP_RELEASES, GDP_WARMUP, read_vintages
 
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "backtest_outputs" / "cache"
@@ -80,6 +81,18 @@ def load_fred(fname: str) -> pd.Series:
     s = pd.Series(pd.to_numeric(df.iloc[:, 1], errors="coerce").values,
                   index=pd.to_datetime(df.iloc[:, 0]))
     return s.dropna().sort_index()
+
+
+def load_gdp_released() -> pd.Series:
+    """发布日可用于当日收盘; 早期费城联储快照采用保守的月末可用日。"""
+    vintages = read_vintages(CACHE / GDP_WARMUP) | read_vintages(CACHE / GDP_RELEASES)
+    released = {}
+    latest_quarter = ""
+    for date, quarter in sorted(vintages):
+        if quarter >= latest_quarter:
+            released[pd.Timestamp(date)] = vintages[date, quarter]["gdp_billions_saar"]
+            latest_quarter = quarter
+    return pd.Series(released, dtype=float, name="GDP")
 
 
 def load_cape() -> pd.Series:
@@ -124,10 +137,8 @@ def load_put_call() -> pd.Series:
 
 
 def load_hy_oas() -> pd.Series:
-    raw = json.loads((CACHE / "macrotrends_high_yield_spread_D.json").read_text())
-    rows = raw["data"]
-    s = pd.Series({pd.to_datetime(int(ts), unit="ms").normalize(): float(v) for ts, v in rows})
-    return s.dropna().sort_index()
+    values = load_hy_observations(CACHE)
+    return pd.Series(values, dtype=float).rename(index=pd.Timestamp).sort_index()
 
 
 # FRED 日频替代源:与 H.15 的 RIFLGFCY*.B 系列逐点同值(全历史零差异),
@@ -309,7 +320,7 @@ def build() -> pd.DataFrame:
 
     cape = load_cape()
     cpi = load_fred("fred_CPIAUCSL.csv")
-    gdp = load_fred("fred_GDP.csv")
+    gdp = load_gdp_released()
     hy = load_hy_oas()
     pc = load_put_call()
     breadth = load_breadth()
@@ -339,11 +350,7 @@ def build() -> pd.DataFrame:
     ecy_score_m = rolling_pct(ecy_m, VAL_WINDOW_M, invert=True, min_periods=VAL_WINDOW_M)  # 反向
     df["ECY"] = daily_ffill(available_next_month(ecy_score_m), idx)
 
-    w5000_m = to_month_last(w5000)
-    gdp_avail = gdp.copy()
-    gdp_avail.index = gdp_avail.index + pd.DateOffset(months=3)                        # GDP 滞后一季度可用
-    gdp_m = to_month_last(gdp_avail).reindex(w5000_m.index, method="ffill")
-    buffett_m = (w5000_m / gdp_m).dropna()
+    buffett_m = to_month_last(w5000 / daily_ffill(gdp, w5000.index))
     buf_score_m = rolling_pct(buffett_m, VAL_WINDOW_M, min_periods=VAL_WINDOW_M)        # 正向
     df["Buffett"] = daily_ffill(available_next_month(buf_score_m), idx)
 
@@ -666,7 +673,7 @@ def write_report(df: pd.DataFrame):
              "任何计算函数;仅复用 `backtest_outputs/cache`、`data_manual` 中的**原始数据**。"
              "与 ChatGPT 生成的 `backtest_outputs/backtest_report.md` 相互独立、互不覆盖。")
     L.append("")
-    L.append(f"- 生成口径:截至约 {ldate} 的缓存数据;严格防前视(估值类月度数据滞后 1 月、GDP 滞后 1 季可用)。")
+    L.append(f"- 生成口径:截至约 {ldate} 的缓存数据。月度估值滞后 1 月，GDP 使用当时已公布的版本。")
     L.append("- 数据复用,逻辑自写:标准化(mid-rank 逐日分位)、分窗口、方向、绝对锚点、"
              "ECY 历史重构、维度合成、三条修正、档位/迟滞/卖出双确认,均按方案 §1–§4、§7 独立编码。")
     L.append("")

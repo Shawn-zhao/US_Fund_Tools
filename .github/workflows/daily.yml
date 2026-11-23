@@ -3,10 +3,11 @@ name: daily-status
 # 每个工作日美股收盘后跑 daily_status.py,生成 index.html / status.json。
 # 发布方式:GitHub Pages「用 Actions 部署」——把产物作为 artifact 上传部署,
 #   不再每天 commit 回仓库,所以 main 分支不会被每日提交刷屏。
+# 每次 Pages 发布成功后,把发布的 status.json 原样归档到私有数据仓库。
+#   同一交易日可有多次发布,每次以 Actions 运行编号及尝试编号留档。
 # 缓存持久化:每月把 backtest_outputs/cache 与 data_manual 提交回仓库一次
 #   (本月首次成功运行;见文末 "Commit cache monthly")。
-#   依据:daily_status.py 的 fetch_yahoo 一次抓最近 3 个月(≈63 交易日),
-#   远大于一个月空档(≈21 交易日),3 倍冗余,断档风险基本为零。
+#   行情从每个缓存文件的末尾续抓，部署停摆后也能补齐未入库的交易日。
 # 注意:GitHub 定时任务用 UTC,且高峰期可能延迟几分钟到几十分钟(对每天一次无影响)。
 
 on:
@@ -34,7 +35,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout private breadth archive
+      - name: Checkout private market data archive
         uses: actions/checkout@v6
         with:
           repository: ${{ github.repository_owner }}/US_Fund_Tools-data
@@ -102,6 +103,22 @@ jobs:
       - name: Deploy to Pages
         id: deploy
         uses: actions/deploy-pages@v4
+
+      - name: Archive published status
+        run: |
+          archive=.market-data-archive
+          path=$(python archive_daily_status.py _site/status.json "$archive" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT")
+          git -C "$archive" add -- "${path#"$archive"/}"
+          if git -C "$archive" diff --cached --quiet; then
+            exit 0
+          fi
+          git -C "$archive" config user.name 'github-actions[bot]'
+          git -C "$archive" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$archive" commit -m 'Archive published daily status [skip ci]'
+          if ! git -C "$archive" push origin HEAD:main; then
+            git -C "$archive" pull --rebase origin main
+            git -C "$archive" push origin HEAD:main
+          fi
 
       # ---- 每月一次:把缓存提交回仓库(本月首次成功运行) ----
       # 原逻辑是「每月第一个周一」,但若那天恰逢运行被取消/失败(如 2026-09-07 那次),

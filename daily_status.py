@@ -14,8 +14,8 @@
 from __future__ import annotations
 import json, sys, time, random, datetime as dt, urllib.request, urllib.parse
 from pathlib import Path
-import numpy as np
 import pandas as pd
+from archive_daily_status import latest_published_signals
 
 CST = dt.timezone(dt.timedelta(hours=8))  # 东八区(北京时间)
 
@@ -58,22 +58,34 @@ def http_bytes(url: str, timeout: int = 20) -> bytes:
         return r.read()
 
 
-def fetch_yahoo(symbol: str, retries: int = 5):
-    """返回 [(date_str, close), ...] 最近 3 个月日线。
+def fetch_yahoo(symbol: str, retries: int = 5, *, since: dt.date | None = None):
+    """返回 [(date_str, close), ...] 已收盘日线，从 since 当日继续抓取。
     带指数退避重试,并在 query1/query2 间轮换,缓解 429/限流;全部失败才抛异常。"""
     hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"]
     last = None
     for attempt in range(retries):
+        now = dt.datetime.now(dt.timezone.utc)
+        params = {"interval": "1d", "range": "3mo"}
+        if since is not None:
+            boundary = dt.datetime.combine(since, dt.time.min, tzinfo=dt.timezone.utc)
+            params = {"interval": "1d", "period1": int(boundary.timestamp()), "period2": int(now.timestamp())}
         host = hosts[attempt % len(hosts)]
         url = (f"https://{host}/v8/finance/chart/"
-               + urllib.parse.quote(symbol) + "?range=3mo&interval=1d")
+               + urllib.parse.quote(symbol) + "?" + urllib.parse.urlencode(params))
         try:
             j = json.loads(http_bytes(url).decode())
             res = j["chart"]["result"][0]
             ts = res["timestamp"]
             closes = res["indicators"]["quote"][0]["close"]
-            out = [(dt.datetime.utcfromtimestamp(t).strftime("%Y-%m-%d"), float(c))
-                   for t, c in zip(ts, closes) if c is not None]
+            regular = res.get("meta", {}).get("currentTradingPeriod", {}).get("regular", {})
+            pending_session = None
+            if regular and now.timestamp() < regular["end"]:
+                pending_session = dt.datetime.fromtimestamp(regular["start"], dt.timezone.utc).date().isoformat()
+            out = []
+            for timestamp, close in zip(ts, closes):
+                day = dt.datetime.fromtimestamp(timestamp, dt.timezone.utc).date().isoformat()
+                if close is not None and day != pending_session:
+                    out.append((day, float(close)))
             if out:
                 return out
             raise ValueError("空数据")
@@ -93,7 +105,7 @@ def update_cache():
         try:
             df = pd.read_csv(path, parse_dates=["date"])
             last = df["date"].max()
-            rows = fetch_yahoo(YH_SYMBOL[key])
+            rows = fetch_yahoo(YH_SYMBOL[key], since=last.date())
             new = [(d, c) for d, c in rows if pd.Timestamp(d) > last]
             if new:
                 add = pd.DataFrame(new, columns=["date", "close"])
@@ -112,10 +124,19 @@ def compute_signals():
     import backtest_v25_independent_Opus4_8 as v25
     import backtest_v26_design_Opus4_8 as d
     df = d.build_core()
+    # build_core 只保留两指数共有的日期。把仅一个指数有报价的交易日补回，
+    # 让其缺失的信号中断确认计数，也让新鲜度检查能发现最新交易日的缺口。
+    spx, ndx = (v25.load_yahoo(YH[key]) for key in ("GSPC", "NDX"))
+    df = df.reindex(spx.index.union(ndx.index))
+    df["spx"], df["ndx"] = spx, ndx
     df["heat"] = df["heat_pct"]
+    # 热度可在分量缺失时继续估算，交易确认仍须两项当天均有原始观测。
+    breadth_days = v25.load_breadth().dropna().index
+    put_call_days = v25.load_put_call().dropna().index
+    df["market_indicators_complete"] = df.index.isin(breadth_days) & df.index.isin(put_call_days)
     # 原始 VIX 分位(高=恐慌)与期限结构
-    vix = v25.load_yahoo(YH["VIX"]).reindex(df.index).ffill()
-    vix3m = v25.load_yahoo(YH["VIX3M"]).reindex(df.index).ffill()
+    vix = v25.load_yahoo(YH["VIX"]).reindex(df.index)
+    vix3m = v25.load_yahoo(YH["VIX3M"]).reindex(df.index)
     df["vix"] = vix
     df["vix3m"] = vix3m
     df["vix_pct"] = v25.expanding_pct(vix.dropna()).reindex(df.index)
@@ -133,7 +154,8 @@ def freshcheck(df):
     last = df.index.max()
     # (名称, 最后可用日期, 容忍滞后天数)
     inputs = [
-        ("行情 SPX/NDX(Yahoo)", df["spx"].dropna().index.max(), 5),
+        ("行情 SPX(Yahoo)",     df["spx"].dropna().index.max(), 5),
+        ("行情 NDX(Yahoo)",     df["ndx"].dropna().index.max(), 5),
         ("VIX(Yahoo)",          v25.load_yahoo(YH["VIX"]).index.max(), 5),
         ("VIX3M(Yahoo)",        v25.load_yahoo(YH["VIX3M"]).index.max(), 5),
         ("HY利差(FRED)",        v25.load_hy_oas().index.max(), 5),
@@ -141,7 +163,7 @@ def freshcheck(df):
         ("10Y TIPS(FRED)",      v25.load_rate_series("RIFLGFCY10_XII_N.B").index.max(), 5),
         ("CAPE(multpl·月)",     v25.load_cape().index.max(), 60),
         ("CPI(FRED·月)",        v25.load_fred("fred_CPIAUCSL.csv").index.max(), 60),
-        ("GDP(FRED·季)",        v25.load_fred("fred_GDP.csv").index.max(), 200),
+        ("GDP（BEA 发布）",     v25.load_gdp_released().index.max(), 200),
     ]
     report, stale = {}, []
     log("  -- 输入源最后可用日期(基准 = 最后交易日 %s)--" % last.date())
@@ -191,78 +213,131 @@ def freshcheck(df):
 def replay(df, price_col):
     """对单个资产回放状态机,返回逐日状态 DataFrame(到今日)。"""
     price = df[price_col]
-    ma200 = price.rolling(200).mean()
+    ma200 = price.dropna().rolling(200).mean()
     dd = 1 - price / price.cummax()
     sub = df.loc[START:].copy()
     sub["price"] = price.loc[START:]
     sub["ma200"] = ma200.loc[START:]
     sub["dd"] = dd.loc[START:]
     need = ["CAPE", "Buffett", "heat", "vix", "vix3m", "vix_pct", "price", "ma200", "dd"]
-    sub = sub.dropna(subset=need)
+    valid = sub[need].notna().all(axis=1)
+    if "market_indicators_complete" in sub:
+        valid &= sub["market_indicators_complete"].eq(True).fillna(False)
 
     state = "normal"
     trig = 0          # 连续满足减仓条件天数
     above = 0         # 连续 price>ma200 天数
     days_in = 0
     recs = []
-    for ts, row in sub.iterrows():
+    for (ts, row), has_data in zip(sub.iterrows(), valid):
+        if not has_data:
+            trig = above = 0
+            continue
+
         cape, buff, heat = row["CAPE"], row["Buffett"], row["heat"]
         trend_break = (row["price"] < row["ma200"]) or (row["dd"] > 0.10)
-        derisk_cond = (cape >= 90) and (buff >= 90) and trend_break
         above = above + 1 if row["price"] > row["ma200"] else 0
         panic = (row["vix_pct"] > 95) and (row["vix"] > row["vix3m"])
+        cold = heat < 30
+        derisk_cond = (cape >= 90) and (buff >= 90) and trend_break and not (cold or panic)
+        trade_signal = None
 
         if state == "normal":
             trig = trig + 1 if derisk_cond else 0
             if trig >= CONFIRM_DAYS:
                 state, trig, days_in = "risk_cash", 0, 0
+                trade_signal = "derisk"
             else:
                 days_in += 1
         else:  # risk_cash
-            buyback = (heat < 30) or panic or (cape < 90) or (buff < 90) or (above >= CONFIRM_DAYS)
+            buyback = cold or panic or (cape < 90) or (buff < 90) or (above >= CONFIRM_DAYS)
             if buyback:
                 state, days_in = "normal", 0
+                trade_signal = "buyback"
             else:
                 days_in += 1
-        recs.append((ts, state, trig, above, days_in, derisk_cond, panic))
+        recs.append((ts, state, trig, above, days_in, derisk_cond, panic, trade_signal))
     out = pd.DataFrame(recs, columns=["dt", "state", "trig", "above", "days_in",
-                                      "derisk_cond", "panic"]).set_index("dt")
-    return sub, out
+                                      "derisk_cond", "panic", "trade_signal"]).set_index("dt")
+    return sub.loc[valid], out
+
+
+def latest_trade_signal(st):
+    trades = st["trade_signal"].dropna()
+    if trades.empty:
+        return None
+    signal = {
+        "action": trades.iloc[-1],
+        "signal_date": trades.index[-1].date().isoformat(),
+        "execution_timing": "next_trading_day",
+    }
+    if signal["action"] == "buyback":
+        signal["derisk_signal_date"] = trades.index[-2].date().isoformat()
+    return signal
 
 
 def build_status():
     df = compute_signals()
-    as_of = df.dropna(subset=["heat", "CAPE", "Buffett"]).index.max()
     market_last = df.index.max()
+    market_date = market_last.date().isoformat()
     log("== 数据新鲜度自检 ==")
     dq, stale = freshcheck(df)
-    if as_of < market_last:
-        log(f"  !! 警告:行情已到 {market_last.date()},但信号只算到 {as_of.date()}。"
-            f"上游输入停更,导致 {market_last.date()} 之后的信号整列缺失。")
+    missing_current = [name for name in ("市场广度", "Put/Call") if dq.get(name, {}).get("last") != market_date]
+    published = latest_published_signals(market_date, MONTHLY_PLAN)
     assets = {}
     for asset, col in [("SPX", "spx"), ("NDX", "ndx")]:
         sub, st = replay(df, col)
+        if st.empty:
+            raise ValueError(f"{asset} 没有数据齐全的交易日，无法生成状态")
         ts = st.index.max()
+        decision_date = ts.date().isoformat()
         r = sub.loc[ts]
         s = st.loc[ts]
         state = s["state"]
         heat = float(r["heat"])
         cold_extreme = heat <= 10
         plan = MONTHLY_PLAN[asset]
-        if state == "normal":
-            action = f"每月定投 ${plan['amount']:,} 买入 {plan['etf']};无需其他操作。"
-            if cold_extreme:
-                action += " ⚠️ 极冷:历史级便宜,有闲钱可额外加仓。"
-            elif s["trig"] > 0:
-                action += f"(已连续 {int(s['trig'])}/{CONFIRM_DAYS} 天满足减仓条件,未到 {CONFIRM_DAYS} 天不动)"
+        last_signal = latest_trade_signal(st)
+        trade_signal = None
+        state_zh = "持有避险现金" if state == "risk_cash" else "照常定投"
+        if missing_current:
+            state_zh = "仅观察"
+            action = (f"{'、'.join(missing_current)} 缺 {market_date} 的观测。"
+                      f"最近完整信号截至 {decision_date}，月供照常。")
+        elif ts < market_last:
+            state_zh = "最新信号缺失"
+            action = f"最新完整数据截至 {decision_date}。等数据更新，月供照常。"
+        elif s["trade_signal"] == "derisk":
+            trade_signal = last_signal
+            state_zh = "一次性减仓"
+            action = (f"{decision_date} 收盘发出信号。下一交易日把 {plan['etf']} 这一组合"
+                      f"一次性调到约 {RISK_CASH_TARGET:.0%} 现金或短债，转出后保留这笔资金。"
+                      "若已按同一信号减仓，无需再卖。月供照常。")
+        elif s["trade_signal"] == "buyback":
+            trade_signal = last_signal
+            derisk_date = last_signal["derisk_signal_date"]
+            state_zh = "一次性买回"
+            action = (f"{decision_date} 收盘发出信号。若执行了 {derisk_date} 的减仓"
+                      f"且仍持有本轮避险资金，下一交易日用这笔资金一次性买回 {plan['etf']}。"
+                      "未减仓的只需照常定投。")
+        elif state == "risk_cash":
+            action = "已减仓的保留当次转出的现金或短债，等待买回信号。月供照常买入。"
+        elif s["trig"] > 0:
+            action = f"减仓条件已连续满足 {int(s['trig'])}/{CONFIRM_DAYS} 个交易日。月供照常。"
+        elif cold_extreme:
+            action = "热度处于历史极冷区。月供照常。"
         else:
-            action = (f"维持约 {int(RISK_CASH_TARGET*100)}% 现金(SGOV/BIL);"
-                      f"每月定投 ${plan['amount']:,} 照常买入 {plan['etf']};等待买回条件。")
+            action = "本次收盘未触发减仓或买回。"
         assets[asset] = {
             "state": state,
-            "state_zh": "风险现金" if state == "risk_cash" else ("极冷-满仓" if cold_extreme else "普通-满仓"),
-            "color": "#c0392b" if state == "risk_cash" else ("#1f6feb" if cold_extreme else "#1a8f4c"),
+            "state_zh": state_zh,
+            "color": ("#6e491f" if ts < market_last or missing_current else "#a9362b" if state == "risk_cash"
+                      else "#1f6feb" if cold_extreme else "#1a6e3f"),
             "action": action,
+            "decision_date": decision_date,
+            "trade_signal": trade_signal,
+            "last_trade_signal": last_signal,
+            "last_published_trade_signal": published.get(asset),
             "cold_extreme": bool(cold_extreme),
             "days_in_state": int(s["days_in"]),
             "metrics": {
@@ -279,12 +354,15 @@ def build_status():
                 "VIX贴水": bool(r["vix"] > r["vix3m"]),
             },
         }
+    as_of = min(a["decision_date"] for a in assets.values())
+    if as_of < market_date:
+        log(f"  !! 警告:行情已到 {market_date}，至少一个资产的完整信号只算到 {as_of}。")
     return {
-        "as_of": str(as_of.date()),
-        "market_last": str(market_last.date()),
+        "as_of": as_of,
+        "market_last": market_date,
         "generated_at": dt.datetime.now(CST).strftime("%Y-%m-%d %H:%M 北京时间"),
         "generated_epoch": int(dt.datetime.now(CST).timestamp() * 1000),
-        "data_quality": {"stale": stale, "items": dq},
+        "data_quality": {"stale": stale, "missing_current": missing_current, "items": dq},
         "monthly_plan": MONTHLY_PLAN,
         "monthly_total": sum(p["amount"] for p in MONTHLY_PLAN.values()),
         "assets": assets,
@@ -318,6 +396,8 @@ h1{font-size:20px;margin:0 0 2px}
 .banner .name{font-size:13px;opacity:.85;letter-spacing:1px}
 .banner .state{font-size:26px;font-weight:700;margin-top:2px}
 .banner .action{font-size:14px;margin-top:8px;opacity:.97}
+.signals{padding:10px 20px;font-size:13px;color:var(--mut);border-bottom:1px solid var(--line)}
+.signals div + div{margin-top:4px}
 .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1px;background:var(--line)}
 .m{background:var(--card);padding:12px 14px}
 .m .k{color:var(--mut);font-size:12px}
@@ -325,7 +405,6 @@ h1{font-size:20px;margin:0 0 2px}
 .foot{color:var(--mut);font-size:12px;margin-top:8px}
 .legend{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;font-size:13px;color:var(--mut)}
 .legend b{color:var(--txt)}
-.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:middle}
 .warn{color:#f0b400}
 a{color:#58a6ff}
 </style>
@@ -337,13 +416,13 @@ a{color:#58a6ff}
   <div class="plan" id="plan"></div>
   <div id="assets"></div>
   <div class="legend">
-    <b>状态说明</b><br>
-    <span class="dot" style="background:#1a8f4c"></span><b>普通-满仓</b>:每月按计划定投,不做其他操作。<br>
-    <span class="dot" style="background:#1f6feb"></span><b>极冷-满仓</b>:热度分位≤10,历史级便宜,定投照常,有闲钱可额外加仓。<br>
-    <span class="dot" style="background:#c0392b"></span><b>风险现金</b>:估值双高+趋势破位已确认,维持约20%现金;定投仍照常买入,等待买回。<br><br>
-    <b>触发逻辑</b>:进入风险现金需「CAPE分位≥90 且 巴菲特分位≥90 且 (跌破200日均线 或 回撤>10%)」连续10个交易日;
-    买回需「热度<30 或 恐慌贴水 或 估值退出双高 或 站回200均线连续10天」任一成立。
-    <div class="foot" style="margin-top:10px">本页为量化方法的教育性展示,不构成投资建议。信号用 C1 价格调整日频口径计算。历史表现不代表未来收益。</div>
+    页面显示规则演算结果，实际仓位和成交请查自己的交易记录。漏看时可核对最近信号的日期和成交记录。
+    <details>
+      <summary>触发条件</summary>
+      CAPE 和巴菲特分位均至少为 90，价格跌破 200 日均线或回撤超过 10%，且未进入冷区或恐慌。连续 10 个交易日均满足时，触发一次减仓。
+      持有避险现金期间，热度分位低于 30、VIX 分位超过 95 且 VIX 高于 VIX3M、估值退出双高、或价格连续 10 日高于 200 日均线，满足任一项即触发一次买回。广度、Put/Call 等所需数据缺失时，暂停发出交易信号并重新计算连续天数。
+    </details>
+    <div class="foot" style="margin-top:10px">本页为量化方法的教育性展示，不构成投资建议。估值采用 C1 价格调整口径。历史表现不代表未来收益。</div>
   </div>
 </div>
 <script>
@@ -371,7 +450,7 @@ document.getElementById('sub').textContent = '数据截至 ' + DATA.as_of + ' ·
   let msg = '', hint = '';
   if (DATA.as_of < marketLast){
     // 行情抓到了新的,但信号算不出来 —— 只可能是某个上游输入停更
-    msg = '行情已更新到 ' + marketLast + ',但信号只算到 ' + DATA.as_of;
+    msg = '行情已更新到 ' + marketLast + '，完整信号只算到 ' + DATA.as_of;
     hint = stale.length ? '停更/断供的输入:' + stale.join('、')
                         : '请查看 Actions 日志里的「数据新鲜度自检」。';
   } else if (missing >= 2){
@@ -401,9 +480,19 @@ const sources = ['市场广度', 'Put/Call'].map(name => {
 });
 document.getElementById('sub').append(...sources);
 const plan = Object.entries(DATA.monthly_plan).map(([k,v])=>`${k} <b>$${v.amount.toLocaleString()}</b> → ${v.etf}`).join(' ＋ ');
-document.getElementById('plan').innerHTML = '📅 每月第一个交易日定投(共 <b>$'+DATA.monthly_total.toLocaleString()+'</b>):' + plan + ' 。任何状态下这笔定投都照常执行。';
+document.getElementById('plan').innerHTML = '每月第一个交易日定投，共 <b>$'+DATA.monthly_total.toLocaleString()+'</b> · ' + plan;
 const box = document.getElementById('assets');
+function describeSignal(signal){
+  if (!signal) return '暂无记录';
+  const action = signal.action === 'derisk' ? '一次性减仓' : '一次性买回';
+  const entry = signal.derisk_signal_date ? '（对应 ' + signal.derisk_signal_date + ' 减仓信号）' : '';
+  return signal.signal_date + ' 收盘 · ' + action + entry;
+}
 for(const [name,a] of Object.entries(DATA.assets)){
+  const published = a.last_published_trade_signal;
+  const revised = published && published.signal_date === DATA.market_last
+    && a.decision_date === DATA.market_last && !DATA.data_quality.missing_current?.length
+    && published.action !== a.trade_signal?.action;
   const mh = Object.entries(a.metrics).map(([k,v])=>{
     let disp = (typeof v==='boolean')? (v?'是':'否') : v;
     return `<div class="m"><div class="k">${k}</div><div class="v">${disp}</div></div>`;
@@ -414,7 +503,10 @@ for(const [name,a] of Object.entries(DATA.assets)){
          <div class="name">${name}</div>
          <div class="state">${a.state_zh}</div>
          <div class="action">${a.action}</div>
-         <div class="foot" style="color:#fff;opacity:.8">当前状态已持续 ${a.days_in_state} 个交易日</div>
+       </div>
+       <div class="signals">
+         ${a.trade_signal ? '' : `<div>本次演算最近信号 · ${describeSignal(a.last_trade_signal)}</div>`}
+         <div>此前已发布信号 · ${describeSignal(published)}${revised ? '（本次演算有修订）' : ''}</div>
        </div>
        <div class="metrics">${mh}</div>
      </div>`);

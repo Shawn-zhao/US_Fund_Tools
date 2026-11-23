@@ -23,10 +23,18 @@
 | 文件 | 内容 | 覆盖 | 行数/说明 | SHA256 |
 | --- | --- | --- | --- | --- |
 | `backtest_outputs/cache/barchart_s5th_breadth.csv` | Barchart `$S5TH`，SPX 成分股高于 200DMA 比例 | 2007-01-02 至 2026-06-12 | 4915 | `A4ABD0DC3361E96842E77739356FB367B5D11E6C0F93B2B24267D9982E667EE0` |
-| `backtest_outputs/cache/macrotrends_high_yield_spread_D.json` | HY OAS 全历史镜像 | 1996-12-31 至 2026-06-10 | 7689 | `931E05590CB89908647334814A33B460A8362364F2E9CF3EC8D5CC1B6637A2D4` |
+| `backtest_outputs/cache/macrotrends_high_yield_spread_D.json` | 原始 Macrotrends HY OAS 镜像 | 1996-12-31 至 2026-06-09 | 7688 | Git `50bcede` 中的原始文件 |
 | `backtest_outputs/cache/h15_all.zip` | Federal Reserve H.15 利率原始 ZIP | 至 2026-06-10 | 名义 10Y 与 TIPS 10Y | `79326129D8F757F99C94E4CA94B1C27B2634A0A444437F3D5726A3AD5D7B93F3` |
 
 完整覆盖表见 `backtest_outputs/data_coverage.csv`。
+
+## 名义 GDP 与 HY 利差
+
+- `gdp_bea_release_vintages.csv` 记录自 2002-04-26 起公布的名义 GDP，包含实际发布日期、季度、季调年率（十亿美元）及估计批次。巴菲特指标在发布日收盘采用当时可见的最新季度估计。历史月度分位用该月 W5000 最后收盘日已公布的 GDP。初始缓存覆盖到 2026-10-29，共 1,077 条。生产例行更新从官方工作簿合并新增发布记录。[BEA 发布历史工作簿](https://apps.bea.gov/national/xls/gdp-gdi-vintage-history.xlsx)
+- `gdp_philly_fed_warmup.csv` 提供 1991-12 至 2002-03 的 124 个名义 GDP 月度快照，每月取该版本最新可见的季度值，从该月末保守启用。月末为回测可用日期，早期实际发布日未逐笔核验。费城联储的 1991-12 以前快照是 GNP。可用 `python gdp_vintages.py` 重建暖机缓存。[费城联储 NOUTPUT](https://www.philadelphiafed.org/surveys-and-data/real-time-data-research/noutput)
+- HY 利差是 ICE BofA 美国高收益债指数期权调整利差。原始项目中的 FRED 镜像 `github_eco_archive_BAMLH0A0HYM2.csv` 提供 1996-12-31 至 2021-03-19。之后用 Git `50bcede` 原始 Macrotrends 镜像提取的 `hy_oas_macrotrends_bridge.csv` 覆盖至 2026-06-09。例行更新将 FRED 的滚动三年数据按日合并到 `fred_BAMLH0A0HYM2.csv`。合并历史从 1996-12-31 开始，截至 2026-11-19 共 7,805 条。原有 Macrotrends JSON 即使曾被短窗覆盖，以上文件也能补回早期数据。[FRED 序列说明](https://fred.stlouisfed.org/series/BAMLH0A0HYM2)
+
+离线验证真实 GDP 发布日及 HY 短窗重跑可用 `python -m unittest test_macro_cache`。
 
 ## 每日状态页的后续数据
 
