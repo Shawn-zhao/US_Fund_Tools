@@ -44,6 +44,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from fetch_data import BREADTH_LIVE, PUT_CALL_LIVE
+
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "backtest_outputs" / "cache"
 MANUAL = ROOT / "data_manual"
@@ -84,15 +86,29 @@ def load_cape() -> pd.Series:
     return pd.Series(df["cape"].values, index=df["date"]).dropna().sort_index()
 
 
+def _with_live_observations(history: pd.Series, path: Path, live_source: str, history_source: str) -> pd.Series:
+    source = history_source
+    if path.exists():
+        df = pd.read_csv(path, parse_dates=["date"])
+        live = df.set_index("date")["value"].dropna()
+        if not live.empty and (history.empty or live.index.max() > history.index.max()):
+            source = live_source
+        history = history.combine_first(live).sort_index()
+    history.attrs["source"] = source
+    return history
+
+
 def load_breadth() -> pd.Series:
     df = pd.read_csv(CACHE / "barchart_s5th_breadth.csv", parse_dates=["date"])
-    return pd.Series(df["breadth"].values, index=df["date"]).dropna().sort_index()
+    history = pd.Series(df["breadth"].values, index=df["date"]).dropna().sort_index()
+    return _with_live_observations(history, CACHE / BREADTH_LIVE, "Market Breadth Analysis", "Barchart")
 
 
 def load_put_call() -> pd.Series:
     df = pd.read_csv(MANUAL / "total_put_call.csv")
-    return pd.Series(pd.to_numeric(df["Value"], errors="coerce").values,
-                     index=pd.to_datetime(df["Date"])).dropna().sort_index()
+    history = pd.Series(pd.to_numeric(df["Value"], errors="coerce").values,
+                        index=pd.to_datetime(df["Date"])).dropna().sort_index()
+    return _with_live_observations(history, CACHE / PUT_CALL_LIVE, "Cboe", "YCharts")
 
 
 def load_hy_oas() -> pd.Series:

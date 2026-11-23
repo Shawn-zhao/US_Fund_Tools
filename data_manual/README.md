@@ -27,3 +27,9 @@
 | `backtest_outputs/cache/h15_all.zip` | Federal Reserve H.15 利率原始 ZIP | 至 2026-06-10 | 名义 10Y 与 TIPS 10Y | `79326129D8F757F99C94E4CA94B1C27B2634A0A444437F3D5726A3AD5D7B93F3` |
 
 完整覆盖表见 `backtest_outputs/data_coverage.csv`。
+
+## 每日状态页的后续数据
+
+- `daily_status.py` 在更新行情后补抓两项日频数据，分别在 `backtest_outputs/cache/live/` 追加记录。GitHub Actions 在每次运行间恢复和保存该目录。原始历史优先，公开仪表盘显示来源和日期。
+- Put/Call 使用 [Cboe 每日统计](https://www.cboe.com/markets/us/options/market-statistics/daily) 的 `TOTAL PUT/CALL RATIO`，按交易日查询并校验返回日期。请求失败的日期留待下次补抓。
+- 广度按 [Market Breadth Analysis](https://github.com/tradermonty/market-breadth-analysis) 发布的 `Breadth_Index_Raw` 补充。这是标普 500 成分股站上各自 200 日均线的比例，程序要求有至少 95% 成分股参与。与 Barchart 原始历史在 2,399 个共同交易日的相关系数为 0.986，平均绝对差为 5.78 个百分点。成分股范围和价格处理存在差异，2026 年 6 月 12 日之后的接续值是另一供应方的测量值。

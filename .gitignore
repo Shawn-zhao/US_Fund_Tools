@@ -2,3 +2,6 @@
 # 本地跑 daily_status.py 会重新生成,无需提交。线上以 Pages 为准。
 /index.html
 /status.json
+
+# 通过 Actions cache 持久化日频采集结果。
+/backtest_outputs/cache/live/

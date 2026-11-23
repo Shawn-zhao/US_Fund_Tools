@@ -2,7 +2,7 @@
 """每日热度状态引擎 + 网页生成(合并版 v2.6)。作者:Anthropic Claude Opus 4.8。
 
 做三件事:
-  1) 抓取 Yahoo 最新日线(^GSPC/^NDX/^VIX/^VIX3M/^W5000),追加进缓存 CSV(失败则用现有缓存)。
+  1) 更新 Yahoo 日线、宏观、市场广度和 Put/Call 缓存(失败则用现有缓存)。
   2) 复用 build_core 用 C1 价格调整口径算出当日热度/估值/趋势/恐慌信号。
   3) 回放"合并版状态机"(固定定投 + 罕见时一次性 20% 避险),得出 SPX/NDX 今日状态,
      输出 status.json 与自包含 index.html(放服务器,每天刷新即看到今日状态)。
@@ -141,8 +141,6 @@ def freshcheck(df):
         ("10Y TIPS(FRED)",      v25.load_rate_series("RIFLGFCY10_XII_N.B").index.max(), 5),
         ("CAPE(multpl·月)",     v25.load_cape().index.max(), 60),
         ("CPI(FRED·月)",        v25.load_fred("fred_CPIAUCSL.csv").index.max(), 60),
-        ("广度(barchart·月)",   v25.load_breadth().index.max(), 60),
-        ("Put/Call(手工·月)",   v25.load_put_call().index.max(), 60),
         ("GDP(FRED·季)",        v25.load_fred("fred_GDP.csv").index.max(), 200),
     ]
     report, stale = {}, []
@@ -155,6 +153,16 @@ def freshcheck(df):
         if age > tol:
             stale.append(name)
         log(f"     {name:<22} {d.date()}  落后 {age:>4} 天" + ("   <== 停更" if age > tol else ""))
+
+    for name, series in [("市场广度", v25.load_breadth()), ("Put/Call", v25.load_put_call())]:
+        # 以本次用于计算信号的交易日为准,同时暴露最近10个交易日的缺口。
+        latest = series.index[series.index <= last].max()
+        missing = len(df.index[-10:].difference(series.index))
+        report[name] = {"last": str(latest.date()) if pd.notna(latest) else None,
+                        "source": series.attrs["source"], "missing_last_10": missing}
+        if missing:
+            stale.append(name)
+        log(f"     {name:<22} {report[name]['last']}  近10个交易日缺 {missing} 天")
 
     comps = ["CAPE", "ECY", "Buffett", "V", "VIX", "VIXTerm", "PutCall", "S",
              "Dev200", "Drawdown", "WeeklyRSI", "T", "BreadthU", "HY", "B", "base", "heat_pct"]
@@ -380,6 +388,15 @@ document.getElementById('sub').textContent = '数据截至 ' + DATA.as_of + ' ·
     wrap.insertBefore(b, wrap.firstChild);
   }
 })();
+const sources = ['市场广度', 'Put/Call'].map(name => {
+  const item = DATA.data_quality.items[name];
+  const note = document.createElement('div');
+  note.textContent = name + ' ' + (item.last || '暂无数据') + '（' + item.source + '）'
+    + (item.missing_last_10 ? ' · 近 10 个交易日缺 ' + item.missing_last_10 + ' 天' : '');
+  if (item.missing_last_10) note.className = 'warn';
+  return note;
+});
+document.getElementById('sub').append(...sources);
 const plan = Object.entries(DATA.monthly_plan).map(([k,v])=>`${k} <b>$${v.amount.toLocaleString()}</b> → ${v.etf}`).join(' ＋ ');
 document.getElementById('plan').innerHTML = '📅 每月第一个交易日定投(共 <b>$'+DATA.monthly_total.toLocaleString()+'</b>):' + plan + ' 。任何状态下这笔定投都照常执行。';
 const box = document.getElementById('assets');
@@ -406,18 +423,23 @@ for(const [name,a] of Object.entries(DATA.assets)){
 
 
 def main():
+    import backtest_v25_independent_Opus4_8 as v25
+    import fetch_data
+
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
     log("== 更新月频宏观数据(FRED / CAPE) ==")
     try:
-        import fetch_data
         fetch_data.update_macro(CACHE, log)
     except Exception as e:
         log("  月频更新整体失败,全部用旧缓存:", repr(e)[:100])
     log("== 更新行情 ==")
     update_cache()
+    log("== 更新市场广度和 Put/Call ==")
+    trading_days = v25.load_yahoo(YH["GSPC"]).index.date
+    fetch_data.update_market_indicators(CACHE, ROOT / "data_manual", trading_days, log)
     log("== 计算信号 ==")
     status = build_status()
     (ROOT / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -12,15 +12,12 @@
   - FRED DFII10    -> fred_DFII10.csv           (10年期 TIPS 实际利率,日度;= H.15 RIFLGFCY10_XII_N.B)
   - multpl Shiller PE -> multpl_shiller_pe.csv  (CAPE,月度;HTML 抓取,较脆,失败回退缓存)
 
-仍需手动/单独维护(无稳定免费源,见文末说明):
-  - barchart 广度 barchart_s5th_breadth.csv
-  - CBOE Put/Call(data_manual/total_put_call.csv)
-  - 美联储 H.15 利率 h15_all.zip(已降级为 10年期利率的兜底源,见 load_rate_series)
-这些权重低、变化慢,偶尔手动刷新即可;但停更过久会让对应用分量整列断供
-(见 daily_status.py 的 freshcheck),需靠日志/页面告警发现。
+每日状态任务另调用 update_market_indicators,补齐日频市场广度和 Put/Call。
+美联储 H.15 利率 h15_all.zip 仍是手工维护的兜底源。
 """
 from __future__ import annotations
-import json, re, io, time, random, datetime as dt, urllib.request, urllib.parse
+import csv, json, re, io, time, random, datetime as dt, urllib.request, urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -28,6 +25,10 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # 重要:fred.stlouisfed.org 会掐断带浏览器 UA 的请求(连接建立后不返回数据,最终超时);
 # 用非浏览器 UA 才能拿到 fredgraph.csv。曾经因为统一用 UA(浏览器) 导致 FRED 全线抓取失败。
 UA_PLAIN = "US_Fund_Tools/1.0 (daily-status; +https://github.com/shawn-zhao/US_Fund_Tools)"
+BREADTH_URL = "https://tradermonty.github.io/market-breadth-analysis/market_breadth_data.csv"
+CBOE_DAILY_URL = "https://www.cboe.com/markets/us/options/market-statistics/daily"
+BREADTH_LIVE = Path("live/market_breadth_200dma.csv")
+PUT_CALL_LIVE = Path("live/cboe_total_put_call.csv")
 
 
 def _get(url: str, timeout: int = 15, retries: int = 3, ua: str | None = None) -> bytes:
@@ -49,6 +50,100 @@ def _atomic_write(path: Path, data: bytes):
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_bytes(data)
     tmp.replace(path)
+
+
+# ---------- 日频广度和期权情绪 ----------
+def _read_observations(path: Path, date_col: str, value_col: str) -> dict[dt.date, float]:
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return {dt.date.fromisoformat(row[date_col]): float(row[value_col]) for row in csv.DictReader(f)}
+
+
+def _save_observations(path: Path, saved: dict[dt.date, float], new: dict[dt.date, float]) -> None:
+    additions = new.keys() - saved.keys()
+    if additions:
+        saved.update((day, new[day]) for day in additions)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = "date,value\n" + "".join(f"{day},{saved[day]:.8g}\n" for day in sorted(saved))
+        _atomic_write(path, body.encode("utf-8"))
+
+
+def _fetch_breadth() -> tuple[dict[dt.date, float], set[dt.date]]:
+    raw = _get(BREADTH_URL, timeout=12, ua=UA_PLAIN).decode("utf-8-sig")
+    observations = {}
+    sessions = set()
+    for row in csv.DictReader(io.StringIO(raw)):
+        day = dt.date.fromisoformat(row["Date"])
+        if day.weekday() >= 5:
+            continue
+        sessions.add(day)
+        # Raw 是站上各自 200DMA 的比例。200MA 列是该比例再平滑后的值。
+        if not row["Breadth_Index_Raw"] or not row["Coverage_200"]:
+            continue
+        share, coverage = float(row["Breadth_Index_Raw"]), float(row["Coverage_200"])
+        if 0 <= share <= 1 and 0.95 <= coverage <= 1:
+            observations[day] = share * 100
+    if not observations:
+        raise ValueError("广度来源没有通过范围和覆盖率校验的记录")
+    return observations, sessions
+
+
+def _fetch_cboe_put_call(day: dt.date) -> float:
+    url = CBOE_DAILY_URL + "?dt=" + day.isoformat()
+    html = _get(url, timeout=8, retries=2, ua=UA_PLAIN).decode("utf-8")
+    selected = re.search(r'\\"selectedDate\\":\\"(\d{4}-\d{2}-\d{2})\\"', html)
+    if selected is None or selected[1] != day.isoformat():
+        raise ValueError("Cboe 返回日期与请求日期不一致")
+    ratio = re.search(r'<td\b[^>]*>\s*TOTAL PUT/CALL RATIO\s*</td>\s*'
+                      r'<td\b[^>]*>\s*(\d+(?:\.\d+)?)\s*</td>', html)
+    if ratio is None or float(ratio[1]) <= 0:
+        raise ValueError("Cboe 未发布有效的总 Put/Call 比率")
+    return float(ratio[1])
+
+
+def update_market_indicators(cache, manual, trading_days, log=print):
+    """按交易日追加缺口,把原始历史与每日下载分开保留。"""
+    trading_days = set(trading_days)
+    if not trading_days:
+        log("  市场广度/Put/Call：无行情日期，保留旧缓存")
+        return
+    last = max(trading_days)
+    try:
+        breadth, available_sessions = _fetch_breadth()
+        # 日报行情缓存缺少某天时,也可用广度源列出的 SPY 交易日补取 Cboe。
+        trading_days.update(day for day in available_sessions if day <= last)
+        original = _read_observations(cache / "barchart_s5th_breadth.csv", "date", "breadth")
+        path = cache / BREADTH_LIVE
+        saved = _read_observations(path, "date", "value") if path.exists() else {}
+        first = max(original)
+        new = {day: value for day, value in breadth.items() if first < day <= last}
+        count = len(new.keys() - saved.keys())
+        _save_observations(path, saved, new)
+        log(f"  市场广度(Market Breadth Analysis)：新增 {count} 天，至 {max(saved.keys() | original.keys())}")
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, csv.Error) as exc:
+        log(f"  市场广度更新失败，保留旧缓存：{exc}")
+
+    try:
+        original = _read_observations(manual / "total_put_call.csv", "Date", "Value")
+        path = cache / PUT_CALL_LIVE
+        saved = _read_observations(path, "date", "value") if path.exists() else {}
+        # 每批先抓最近的交易日,并留出名额补旧缺口。失败的日期下一次继续尝试。
+        first = max(original)
+        missing = sorted(day for day in trading_days - saved.keys() if day > first)
+        batch = list(dict.fromkeys(missing[-10:][::-1] + missing[:120]))
+
+        def fetch(day):
+            try:
+                return day, _fetch_cboe_put_call(day)
+            except (OSError, RuntimeError, ValueError) as exc:
+                log(f"  Cboe {day} 更新失败：{exc}")
+                return day, None
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            new = {day: value for day, value in pool.map(fetch, batch) if value is not None}
+        _save_observations(path, saved, new)
+        log(f"  Put/Call(Cboe)：新增 {len(new)} 天，至 {max(saved.keys() | original.keys())}，待补 {len(missing) - len(new)} 天")
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError, csv.Error) as exc:
+        log(f"  Put/Call 更新失败，保留旧缓存：{exc}")
 
 
 # ---------- FRED:fredgraph.csv,无需 API key ----------
