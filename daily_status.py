@@ -160,6 +160,8 @@ def freshcheck(df):
         missing = len(df.index[-10:].difference(series.index))
         report[name] = {"last": str(latest.date()) if pd.notna(latest) else None,
                         "source": series.attrs["source"], "missing_last_10": missing}
+        if name == "市场广度" and pd.notna(series.attrs["barchart_last"]):
+            report[name]["barchart_last"] = series.attrs["barchart_last"].date().isoformat()
         if missing:
             stale.append(name)
         log(f"     {name:<22} {report[name]['last']}  近10个交易日缺 {missing} 天")
@@ -392,6 +394,7 @@ const sources = ['市场广度', 'Put/Call'].map(name => {
   const item = DATA.data_quality.items[name];
   const note = document.createElement('div');
   note.textContent = name + ' ' + (item.last || '暂无数据') + '（' + item.source + '）'
+    + (item.barchart_last && item.source !== 'Barchart' ? ' · Barchart 历史至 ' + item.barchart_last : '')
     + (item.missing_last_10 ? ' · 近 10 个交易日缺 ' + item.missing_last_10 + ' 天' : '');
   if (item.missing_last_10) note.className = 'warn';
   return note;

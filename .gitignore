@@ -5,3 +5,4 @@
 
 # 通过 Actions cache 持久化日频采集结果。
 /backtest_outputs/cache/live/
+/.market-data-archive/

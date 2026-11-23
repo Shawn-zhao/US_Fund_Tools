@@ -16,7 +16,7 @@
 美联储 H.15 利率 h15_all.zip 仍是手工维护的兜底源。
 """
 from __future__ import annotations
-import csv, json, re, io, time, random, datetime as dt, urllib.request, urllib.parse
+import csv, json, re, io, os, time, random, datetime as dt, urllib.request, urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,6 +29,11 @@ BREADTH_URL = "https://tradermonty.github.io/market-breadth-analysis/market_brea
 CBOE_DAILY_URL = "https://www.cboe.com/markets/us/options/market-statistics/daily"
 BREADTH_LIVE = Path("live/market_breadth_200dma.csv")
 PUT_CALL_LIVE = Path("live/cboe_total_put_call.csv")
+BARCHART_BREADTH = "barchart_s5th_breadth.csv"
+BREADTH_ARCHIVE = "breadth_daily.csv"
+BREADTH_SOURCE = "Market Breadth Analysis"
+# 日本时间 2026-11-23 上午时，最近一个已收盘的美股交易日。
+BREADTH_ARCHIVE_AFTER = dt.date(2026, 11, 20)
 
 
 def _get(url: str, timeout: int = 15, retries: int = 3, ua: str | None = None) -> bytes:
@@ -65,6 +70,34 @@ def _save_observations(path: Path, saved: dict[dt.date, float], new: dict[dt.dat
         path.parent.mkdir(parents=True, exist_ok=True)
         body = "date,value\n" + "".join(f"{day},{saved[day]:.8g}\n" for day in sorted(saved))
         _atomic_write(path, body.encode("utf-8"))
+
+
+def breadth_archive_dir() -> Path | None:
+    path = os.environ.get("MARKET_BREADTH_ARCHIVE_DIR")
+    return Path(path) if path else None
+
+
+def _append_breadth_archive(path: Path, observations: dict[dt.date, float], fetched_at: str) -> int:
+    fields = ("date", "value", "source", "fetched_at_utc")
+    saved = {}
+    exists = path.exists()
+    if exists:
+        with path.open(encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames != list(fields):
+                raise ValueError("市场广度存档的 CSV 表头不匹配")
+            saved = {dt.date.fromisoformat(row["date"]): row for row in reader}
+    additions = observations.keys() - saved.keys()
+    if additions or not exists:
+        for day in additions:
+            saved[day] = {"date": day.isoformat(), "value": f"{observations[day]:.8g}",
+                          "source": BREADTH_SOURCE, "fetched_at_utc": fetched_at}
+        buffer = io.StringIO(newline="")
+        writer = csv.DictWriter(buffer, fieldnames=fields, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(saved[day] for day in sorted(saved))
+        _atomic_write(path, buffer.getvalue().encode("utf-8"))
+    return len(additions)
 
 
 def _fetch_breadth() -> tuple[dict[dt.date, float], set[dt.date]]:
@@ -109,16 +142,26 @@ def update_market_indicators(cache, manual, trading_days, log=print):
     last = max(trading_days)
     try:
         breadth, available_sessions = _fetch_breadth()
+        fetched_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
         # 日报行情缓存缺少某天时,也可用广度源列出的 SPY 交易日补取 Cboe。
         trading_days.update(day for day in available_sessions if day <= last)
-        original = _read_observations(cache / "barchart_s5th_breadth.csv", "date", "breadth")
+        original = _read_observations(cache / BARCHART_BREADTH, "date", "breadth")
+        archive = breadth_archive_dir()
+        if archive is not None:
+            extension = archive / BARCHART_BREADTH
+            if extension.exists():
+                original.update(_read_observations(extension, "date", "breadth"))
+            new_daily = {day: value for day, value in breadth.items() if BREADTH_ARCHIVE_AFTER < day <= last}
+            archived = _append_breadth_archive(archive / BREADTH_ARCHIVE, new_daily, fetched_at)
+            log(f"  市场广度私有存档：新增 {archived} 天")
         path = cache / BREADTH_LIVE
         saved = _read_observations(path, "date", "value") if path.exists() else {}
         first = max(original)
-        new = {day: value for day, value in breadth.items() if first < day <= last}
+        preview_last = last if archive is None else min(last, BREADTH_ARCHIVE_AFTER)
+        new = {day: value for day, value in breadth.items() if first < day <= preview_last}
         count = len(new.keys() - saved.keys())
         _save_observations(path, saved, new)
-        log(f"  市场广度(Market Breadth Analysis)：新增 {count} 天，至 {max(saved.keys() | original.keys())}")
+        log(f"  市场广度补缺缓存：新增 {count} 天，至 {max(saved.keys() | original.keys())}")
     except (OSError, RuntimeError, ValueError, TypeError, KeyError, csv.Error) as exc:
         log(f"  市场广度更新失败，保留旧缓存：{exc}")
 

@@ -44,7 +44,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from fetch_data import BREADTH_LIVE, PUT_CALL_LIVE
+from fetch_data import (BARCHART_BREADTH, BREADTH_ARCHIVE, BREADTH_LIVE, BREADTH_SOURCE,
+                        PUT_CALL_LIVE, breadth_archive_dir)
 
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "backtest_outputs" / "cache"
@@ -99,9 +100,19 @@ def _with_live_observations(history: pd.Series, path: Path, live_source: str, hi
 
 
 def load_breadth() -> pd.Series:
-    df = pd.read_csv(CACHE / "barchart_s5th_breadth.csv", parse_dates=["date"])
-    history = pd.Series(df["breadth"].values, index=df["date"]).dropna().sort_index()
-    return _with_live_observations(history, CACHE / BREADTH_LIVE, "Market Breadth Analysis", "Barchart")
+    history = pd.read_csv(CACHE / BARCHART_BREADTH, index_col="date", parse_dates=True)["breadth"].dropna().sort_index()
+    archive = breadth_archive_dir()
+    if archive is not None and (archive / BARCHART_BREADTH).exists():
+        extension = pd.read_csv(archive / BARCHART_BREADTH, index_col="date", parse_dates=True)["breadth"].dropna()
+        history = history.combine_first(extension).sort_index()
+    barchart_last = history.index.max()
+    source = "Barchart"
+    if archive is not None:
+        history = _with_live_observations(history, archive / BREADTH_ARCHIVE, BREADTH_SOURCE, source)
+        source = history.attrs["source"]
+    series = _with_live_observations(history, CACHE / BREADTH_LIVE, BREADTH_SOURCE, source)
+    series.attrs["barchart_last"] = barchart_last
+    return series
 
 
 def load_put_call() -> pd.Series:
