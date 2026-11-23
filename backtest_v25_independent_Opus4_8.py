@@ -92,9 +92,10 @@ def _with_live_observations(history: pd.Series, path: Path, live_source: str, hi
     if path.exists():
         df = pd.read_csv(path, parse_dates=["date"])
         live = df.set_index("date")["value"].dropna()
-        if not live.empty and (history.empty or live.index.max() > history.index.max()):
-            source = live_source
-        history = history.combine_first(live).sort_index()
+        if not live.empty:
+            if history.empty or live.index.max() > history.index.max():
+                source = live_source
+            history = history.combine_first(live).sort_index()
     history.attrs["source"] = source
     return history
 
