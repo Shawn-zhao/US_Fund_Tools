@@ -105,7 +105,7 @@ def load_breadth() -> pd.Series:
     archive = breadth_archive_dir()
     if archive is not None and (archive / BARCHART_BREADTH).exists():
         extension = pd.read_csv(archive / BARCHART_BREADTH, index_col="date", parse_dates=True)["breadth"].dropna()
-        history = history.combine_first(extension).sort_index()
+        history = extension.combine_first(history).sort_index()
     barchart_last = history.index.max()
     source = "Barchart"
     if archive is not None:
